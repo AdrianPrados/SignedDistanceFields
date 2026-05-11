@@ -1,5 +1,9 @@
 # -----------------------------------------------------------------------------
 # SPDX-License-Identifier: MIT
+# General porpose robot SDF module for PyTorch, using Bernstein basis functions and mesh sampling.
+# It can be applied to robot with multiple end-effectors (humanoids, mobile manipulators, etc.) by simply providing the URDF and using the same query interface. 
+# It can also be used for non-robotic articulated objects like hands, animals, or even plants, as long as they can be described by a URDF and have meshes. 
+# The key is that the method learns a separate SDF for each link, so it can handle any structure that can be represented in that way.
 # -----------------------------------------------------------------------------
 
 import glob
@@ -205,11 +209,14 @@ class RobotSDF:
         self._maybe_migrate_models()
 
         self.link_meshes = self._load_link_meshes()
+        self.joint_tree = self._build_joint_tree()
         self.link_names = sorted(self.link_meshes.keys())
-        end_link = self._guess_end_link()
-        self.chain = pk.build_serial_chain_from_urdf(
+        self.chain = pk.build_chain_from_urdf(open(self.urdf_path).read().encode()).to(dtype=torch.float32, device=self.device)
+        
+        #end_link = self._guess_end_link()
+        """ self.chain = pk.build_serial_chain_from_urdf(
             open(self.urdf_path).read().encode(), end_link
-        ).to(dtype=torch.float32, device=self.device)
+        ).to(dtype=torch.float32, device=self.device) """
         self.dof = len(self.chain.get_joint_parameter_names())
 
         self.model: Optional[Dict[str, Dict[str, torch.Tensor]]] = None
@@ -341,6 +348,20 @@ class RobotSDF:
         xyz = [float(x) for x in origin.attrib.get("xyz", "0 0 0").split()]
         rpy = [float(r) for r in origin.attrib.get("rpy", "0 0 0").split()]
         return self._rpy_xyz_to_matrix(rpy, xyz)
+    
+    def _build_joint_tree(self) -> Dict[str, Tuple[str, np.ndarray]]:
+        tree = ET.parse(self.urdf_path)
+        root = tree.getroot()
+        joint_tree = {}
+        for joint in root.findall("joint"):
+            parent_elem = joint.find("parent")
+            child_elem = joint.find("child")
+            if parent_elem is not None and child_elem is not None:
+                parent = parent_elem.attrib["link"]
+                child = child_elem.attrib["link"]
+                origin_mat = self._parse_origin(joint)
+                joint_tree[child] = (parent, origin_mat)
+        return joint_tree
 
     def _load_link_meshes(self) -> Dict[str, "trimesh.Trimesh"]:
         tree = ET.parse(self.urdf_path)
@@ -499,7 +520,8 @@ class RobotSDF:
             model[link_name] = {
                 "mesh_name": link_name,
                 "weights": wb.detach().cpu(),
-                "offset": torch.from_numpy(offset).float(),
+                "offset": torch.from_numpy(offset).float(), #! Lo cambio para que no de el erro de los floatde Numpy
+                #"offset": torch.from_numpy(offset.copy()).float(),
                 "scale": float(scale),
             }
             print(f"Fitted link {link_name}")
@@ -523,7 +545,7 @@ class RobotSDF:
     ) -> Dict[str, torch.Tensor]:
         if theta.ndim == 1:
             theta = theta[None, :]
-        trans = self.chain.forward_kinematics(theta, end_only=False)
+        trans = self.chain.forward_kinematics(theta)
         if base_pose is None:
             base_pose = torch.eye(4, device=theta.device, dtype=theta.dtype).view(1, 4, 4).expand(theta.shape[0], 4, 4)
         elif base_pose.ndim == 2:
@@ -589,7 +611,33 @@ class RobotSDF:
         K = len(link_names)
         N = points.shape[1]
 
-        fk_trans = torch.stack([transforms[name] for name in link_names], dim=1)
+        #fk_trans = torch.stack([transforms[name] for name in link_names], dim=1)
+        device = list(transforms.values())[0].device
+        dtype = list(transforms.values())[0].dtype
+
+        # Función recursiva que busca la posición de cualquier link
+        def get_transform(link_name):
+            # 1. Si la cinemática lo conoce (es móvil o raíz), devolvemos su posición
+            if link_name in transforms:
+                return transforms[link_name]
+            
+            # 2. Si el link no existe ni en el URDF, usamos el de la raíz por seguridad
+            if link_name not in self.joint_tree:
+                fallback = 'rb1_base_footprint' if 'rb1_base_footprint' in transforms else list(transforms.keys())[0]
+                return transforms[fallback]
+            
+            # 3. Si es fijo, buscamos a su padre en el URDF y su distancia (matriz 4x4)
+            parent_name, local_np = self.joint_tree[link_name]
+            
+            # Buscamos dónde está el padre en el mundo real
+            parent_T = get_transform(parent_name) 
+            
+            # Convertimos la matriz local a tensor y multiplicamos (Global = Padre * Local)
+            local_T = torch.tensor(local_np, dtype=dtype, device=device)
+            return torch.matmul(parent_T, local_T)
+
+        # Calculamos todos los links con una sola línea elegante
+        fk_trans = torch.stack([get_transform(name) for name in link_names], dim=1)
         fk_flat = fk_trans.reshape(-1, 4, 4)
         fk_inv = torch.linalg.inv(fk_flat)
 
@@ -640,10 +688,11 @@ class RobotSDF:
         self,
         theta: torch.Tensor,
         nb_data: int = 64,
-        domain_min: Tuple[float, float, float] = (-1.0, -1.0, -1.0),
-        domain_max: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+        domain_min: Tuple[float, float, float] = (-2.0, -2.0, -2.0),
+        domain_max: Tuple[float, float, float] = (2.0, 2.0, 2.0),
         show: bool = True,
         out_path: Optional[str] = None,
+        mesh_points=200_000,
     ) -> "trimesh.Trimesh":
         if measure is None:
             raise ModuleNotFoundError("Missing dependency 'scikit-image' (skimage). Install it to run marching cubes.")
@@ -656,7 +705,7 @@ class RobotSDF:
         points = torch.stack([grid_x, grid_y, grid_z], dim=-1).reshape(-1, 3)
         sdf_chunks: List[torch.Tensor] = []
         with torch.no_grad():
-            for p in torch.split(points, 200_000, dim=0):
+            for p in torch.split(points, mesh_points, dim=0):
                 v, _g = self.query(p, theta, return_grad=False)
                 sdf_chunks.append(v.reshape(-1).detach())
         sdf_flat = torch.cat(sdf_chunks, dim=0)

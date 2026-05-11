@@ -22,6 +22,7 @@ To generate the robot SDF for a new URDF file:
    - `--mesh-type`: Choose `visual` for visual meshes or `collision` for collision meshes.
    - `--n-func`: Number of Bernstein basis functions (higher = more accurate but slower).
    - `--n-seg`: Number of segments for the basis (higher = more accurate).
+   - `robot_sdf.run`: Is used for general robots, meanwhile `robotArms_sdf.run` is a specific script for robotics arms.
 
    This command will:
    - Parse the URDF and load link meshes.
