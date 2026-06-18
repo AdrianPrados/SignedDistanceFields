@@ -728,3 +728,362 @@ class RobotSDF:
             except BaseException as exc:
                 print(f"Mesh viewer failed: {exc}")
         return mesh
+    
+    def visualize_lightweight(
+        self,
+        theta: torch.Tensor,
+        num_points_per_link: int = 300,
+        show_frames: bool = False,
+        show_pointcloud: bool = True,
+        show: bool = True,
+    ) -> "trimesh.Scene":
+        """
+        Visualización interactiva y ligera del robot.
+        - show_frames: Muestra los ejes de coordenadas simulando el "perfil" o esqueleto del robot.
+        - show_pointcloud: Muestra una nube de puntos envolvente que representa el límite del SDF.
+        """
+        if trimesh is None:
+            raise ModuleNotFoundError("Se requiere 'trimesh' para la visualización ligera.")
+        
+        # Ajuste de dimensiones para el tensor
+        if theta.ndim == 1:
+            theta = theta.unsqueeze(0)
+
+        # 1. Calcular cinemática directa (FK) para obtener las poses de los links
+        link_names = [ln for ln in self.link_names if ln in self.model]
+        if not link_names:
+            print("No hay modelos cargados para visualizar.")
+            return trimesh.Scene()
+            
+        transforms = self._get_link_transforms(theta, link_names)
+        device = list(transforms.values())[0].device
+        dtype = list(transforms.values())[0].dtype
+
+        # Función recursiva de FK idéntica a la de query()
+        def get_transform(link_name):
+            if link_name in transforms:
+                return transforms[link_name][0]  # Tomar el primer elemento del batch
+            if link_name not in self.joint_tree:
+                fallback = 'rb1_base_footprint' if 'rb1_base_footprint' in transforms else list(transforms.keys())[0]
+                return transforms[fallback][0]
+            parent_name, local_np = self.joint_tree[link_name]
+            parent_T = get_transform(parent_name)
+            local_T = torch.tensor(local_np, dtype=dtype, device=device)
+            return torch.matmul(parent_T, local_T)
+
+        scene = trimesh.Scene()
+        all_surface_points = []
+        all_colors = []
+
+        # 2. Generar elementos visuales link por link
+        for name in link_names:
+            T_tensor = get_transform(name)
+            T_matrix = T_tensor.detach().cpu().numpy()
+
+            # PERFIL DEL ROBOT: Dibujar los sistemas de coordenadas (Frames)
+            if show_frames:
+                frame = trimesh.creation.axis(origin_size=0.015, transform=T_matrix)
+                scene.add_geometry(frame)
+
+            # NUBE DE PUNTOS: Superficie del robot actualizada según su pose
+            if show_pointcloud and name in self.link_meshes:
+                mesh = self.link_meshes[name]
+                
+                # Muestrear puntos de la superficie local del link
+                # (Se podría cachear esto en el __init__ para ser aún más rápidos)
+                points, _ = trimesh.sample.sample_surface(mesh, num_points_per_link)
+                
+                # Transformar puntos al espacio global (multiplicación matricial homogénea)
+                points_hom = np.hstack((points, np.ones((len(points), 1))))
+                points_world = (T_matrix @ points_hom.T).T[:, :3]
+                
+                all_surface_points.append(points_world)
+                
+                # Color distintivo por link para ver las descomposiciones (Rojo, Verde, Azul, etc.)
+                # Generamos colores pastel aleatorios
+                color = np.random.randint(80, 220, size=3).tolist() + [255]
+                colors = np.tile(color, (len(points_world), 1))
+                all_colors.append(colors)
+
+        # 3. Ensamblar la nube de puntos final
+        if show_pointcloud and all_surface_points:
+            final_points = np.vstack(all_surface_points)
+            final_colors = np.vstack(all_colors)
+            point_cloud = trimesh.points.PointCloud(final_points, colors=final_colors)
+            scene.add_geometry(point_cloud)
+
+        # 4. Mostrar escena
+        if show:
+            try:
+                scene.show()
+            except BaseException as exc:
+                print(f"El visor interactivo falló: {exc}")
+
+        return scene
+    
+    def get_surface_points(self, theta: torch.Tensor, num_points_per_link: int = 150, safety_margin: float = 0.0) -> np.ndarray:
+        """
+        Calcula y devuelve los puntos de la superficie de todo el robot 
+        transformados al espacio global según la configuración articular actual.
+        
+        Args:
+            theta: Tensor con la configuración articular.
+            num_points_per_link: Número de puntos a muestrear por link.
+            safety_margin: Margen de seguridad en metros para "inflar" la superficie hacia afuera.
+        """
+        if theta.ndim == 1:
+            theta = theta.unsqueeze(0)
+
+        link_names = [ln for ln in self.link_names if ln in self.model]
+        if not link_names:
+            return np.empty((0, 3))
+            
+        transforms = self._get_link_transforms(theta, link_names)
+        device = list(transforms.values())[0].device
+        dtype = list(transforms.values())[0].dtype
+
+        def get_transform(link_name):
+            if link_name in transforms:
+                return transforms[link_name][0]
+            if link_name not in self.joint_tree:
+                fallback = list(transforms.keys())[0]
+                return transforms[fallback][0]
+            parent_name, local_np = self.joint_tree[link_name]
+            parent_T = get_transform(parent_name)
+            local_T = torch.tensor(local_np, dtype=dtype, device=device)
+            return torch.matmul(parent_T, local_T)
+
+        all_surface_points = []
+
+        for name in link_names:
+            T_tensor = get_transform(name)
+            T_matrix = T_tensor.detach().cpu().numpy()
+
+            if name in self.link_meshes:
+                mesh = self.link_meshes[name]
+                
+                # Muestreamos puntos locales y los índices de las caras correspondientes
+                points, face_indices = trimesh.sample.sample_surface(mesh, num_points_per_link)
+                
+                # Si se define un margen de seguridad, desplazamos los puntos usando las normales
+                if safety_margin > 0.0:
+                    # Obtenemos las normales de las caras donde cayó cada punto muestreado
+                    normals = mesh.face_normals[face_indices]
+                    # Desplazamos los puntos en la dirección de la normal una distancia igual al margen
+                    points = points + normals * safety_margin
+                
+                # Transformamos los puntos expandidos a coordenadas globales mundiales
+                points_hom = np.hstack((points, np.ones((len(points), 1))))
+                points_world = (T_matrix @ points_hom.T).T[:, :3]
+                all_surface_points.append(points_world)
+
+        if all_surface_points:
+            return np.vstack(all_surface_points)
+        return np.empty((0, 3))
+    
+    def get_level_curves(self, theta: torch.Tensor, levels: List[float] = [0.0, 0.05, 0.1, 0.2], num_points_per_link: int = 80) -> List[Tuple[np.ndarray, List[float]]]:
+        """
+        Genera múltiples iso-superficies discretas (curvas de nivel) inflando 
+        el contorno del robot a diferentes rangos de seguridad.
+        
+        Args:
+            theta: Tensor articular.
+            levels: Distancias del SDF en metros que deseamos mapear visualmente.
+            num_points_per_link: Densidad de puntos de la malla por nivel.
+            
+        Returns:
+            Una lista de tuplas [(puntos_nivel_i, color_rgb_i), ...] lista para renderizar en paralelo.
+        """
+        if theta.ndim == 1:
+            theta = theta.unsqueeze(0)
+
+        link_names = [ln for ln in self.link_names if ln in self.model]
+        if not link_names:
+            return []
+            
+        transforms = self._get_link_transforms(theta, link_names)
+        device = list(transforms.values())[0].device
+        dtype = list(transforms.values())[0].dtype
+
+        def get_transform(link_name):
+            if link_name in transforms:
+                return transforms[link_name][0]
+            if link_name not in self.joint_tree:
+                fallback = list(transforms.keys())[0]
+                return transforms[fallback][0]
+            parent_name, local_np = self.joint_tree[link_name]
+            parent_T = get_transform(parent_name)
+            local_T = torch.tensor(local_np, dtype=dtype, device=device)
+            return torch.matmul(parent_T, local_T)
+
+        # Paleta de degradado precalculada para las curvas de nivel (Estilo Jet / Mapa térmico)
+        def get_level_color(idx, total_levels):
+            if total_levels <= 1:
+                return [0.1, 0.6, 1.0] # Azul por defecto
+            ratio = idx / (total_levels - 1)
+            # Interpolación simple de Rojo (superficie corta) a Verde (superficie externa segura)
+            r = float(1.0 - ratio)
+            g = float(ratio)
+            b = float(0.2 + ratio * 0.4)
+            return [r, g, b]
+
+        curves_data = []
+
+        # Estructuramos la iteración primero por nivel para empaquetar nubes consolidadas
+        for l_idx, margin in enumerate(levels):
+            level_points = []
+            
+            for name in link_names:
+                T_matrix = get_transform(name).detach().cpu().numpy()
+
+                if name in self.link_meshes:
+                    mesh = self.link_meshes[name]
+                    points, face_indices = trimesh.sample.sample_surface(mesh, num_points_per_link)
+                    
+                    if margin > 0.0:
+                        normals = mesh.face_normals[face_indices]
+                        points = points + normals * margin
+                    
+                    points_hom = np.hstack((points, np.ones((len(points), 1))))
+                    points_world = (T_matrix @ points_hom.T).T[:, :3]
+                    level_points.append(points_world)
+            
+            if level_points:
+                stacked_points = np.vstack(level_points)
+                color_rgb = get_level_color(l_idx, len(levels))
+                curves_data.append((stacked_points, color_rgb))
+
+        return curves_data
+    
+    def visualize_level_curves(
+        self,
+        theta: torch.Tensor,
+        mode: str = "3d",  # "3d" o "2d"
+        levels: List[float] = [0.0, 0.05, 0.1, 0.2],
+        num_points_per_link: int = 150,
+        show_frames: bool = False,
+        show: bool = True,
+        # Parámetros específicos para la sección de corte 2D
+        plane: str = "xy",
+        intercept: float = 0.0,
+        bounds: Tuple[float, float, float, float] = (-1.0, 1.0, -0.5, 2.0,),
+        res: int = 100,
+    ) -> Optional["trimesh.Scene"]:
+        """
+        Visualiza las curvas de nivel (iso-superficies) del SDF.
+        Permite alternar entre una vista volumétrica 3D (Trimesh) y un corte planar 2D (Matplotlib).
+        """
+        # ==========================================
+        # MODALIDAD 2D: CORTE DE PLANO (MATPLOTLIB)
+        # ==========================================
+        if mode == "2d":
+            import matplotlib.pyplot as plt
+            
+            # Generar la rejilla de evaluación planar
+            u = torch.linspace(bounds[0], bounds[1], res, device=self.device)
+            v = torch.linspace(bounds[2], bounds[3], res, device=self.device)
+            grid_u, grid_v = torch.meshgrid(u, v, indexing="ij")
+            
+            flat_u = grid_u.reshape(-1)
+            flat_v = grid_v.reshape(-1)
+            flat_fixed = torch.ones_like(flat_u) * intercept
+
+            # Mapear los ejes correspondientes según el plano solicitado
+            if plane == "xy":
+                points_3d = torch.stack([flat_u, flat_v, flat_fixed], dim=-1)
+                xlabel, ylabel = "X (metros)", "Y (metros)"
+            elif plane == "xz":
+                points_3d = torch.stack([flat_u, flat_fixed, flat_v], dim=-1)
+                xlabel, ylabel = "X (metros)", "Z (metros)"
+            elif plane == "yz":
+                points_3d = torch.stack([flat_fixed, flat_u, flat_v], dim=-1)
+                xlabel, ylabel = "Y (metros)", "Z (metros)"
+            else:
+                raise ValueError("Plano no válido. Elige entre 'xy', 'xz' o 'yz'.")
+
+            # Evaluar por fragmentos el campo escalar tridimensional del SDF
+            sdf_list = []
+            with torch.no_grad():
+                for chunk in torch.split(points_3d, 10000, dim=0):
+                    sdf_chunk, _ = self.query(chunk, theta, return_grad=False)
+                    sdf_list.append(sdf_chunk.reshape(-1))
+            
+            sdf_flat = torch.cat(sdf_list, dim=0)
+            sdf_grid = sdf_flat.reshape(res, res).cpu().numpy()
+            grid_u_np = grid_u.cpu().numpy()
+            grid_v_np = grid_v.cpu().numpy()
+
+            if show:
+                plt.figure(figsize=(8, 7))
+                # Fondo térmico continuo para denotar el gradiente del campo
+                contour_f = plt.contourf(grid_u_np, grid_v_np, sdf_grid, levels=50, cmap="RdYlGn")
+                plt.colorbar(contour_f, label="Valor del SDF (metros)")
+                
+                # Resaltar la superficie metálica (0.0) sobre los márgenes flotantes
+                linewidths = [2.5 if l == 0.0 else 1.2 for l in levels]
+                linestyles = ["-" if l >= 0.0 else "--" for l in levels]
+                
+                contours = plt.contour(
+                    grid_u_np, grid_v_np, sdf_grid, 
+                    levels=levels, 
+                    colors="black", 
+                    linewidths=linewidths,
+                    linestyles=linestyles
+                )
+                plt.clabel(contours, inline=True, fmt="%.2f", fontsize=10)
+                plt.title(f"Corte SDF en Plano {plane.upper()} (Eje ortogonal = {intercept}m)")
+                plt.xlabel(xlabel)
+                plt.ylabel(ylabel)
+                plt.grid(True, linestyle=":", alpha=0.6)
+                plt.axis("equal")
+                plt.show()
+
+            return grid_u_np, grid_v_np, sdf_grid
+
+        # ==========================================
+        # MODALIDAD 3D: NUBES VOLUMÉTRICAS (TRIMESH)
+        # ==========================================
+        elif mode == "3d":
+            if trimesh is None:
+                raise ModuleNotFoundError("Se requiere 'trimesh' para la visualización de curvas de nivel 3D.")
+            
+            curves_data = self.get_level_curves(theta, levels=levels, num_points_per_link=num_points_per_link)
+            scene = trimesh.Scene()
+            
+            if show_frames:
+                link_names = [ln for ln in self.link_names if ln in self.model]
+                transforms = self._get_link_transforms(theta, link_names)
+                device = list(transforms.values())[0].device
+                dtype = list(transforms.values())[0].dtype
+
+                def get_transform(link_name):
+                    if link_name in transforms:
+                        return transforms[link_name][0]
+                    if link_name not in self.joint_tree:
+                        fallback = list(transforms.keys())[0]
+                        return transforms[fallback][0]
+                    parent_name, local_np = self.joint_tree[link_name]
+                    parent_T = get_transform(parent_name)
+                    local_T = torch.tensor(local_np, dtype=dtype, device=device)
+                    return torch.matmul(parent_T, local_T)
+
+                for name in link_names:
+                    T_matrix = get_transform(name).detach().cpu().numpy()
+                    frame = trimesh.creation.axis(origin_size=0.015, transform=T_matrix)
+                    scene.add_geometry(frame)
+
+            for i, (points, color_float) in enumerate(curves_data):
+                color_255 = [int(c * 255) for c in color_float] + [255]
+                colors_array = np.tile(color_255, (len(points), 1))
+                point_cloud = trimesh.points.PointCloud(points, colors=colors_array)
+                scene.add_geometry(point_cloud, node_name=f"sdf_level_{levels[i]}")
+
+            if show:
+                try:
+                    scene.show()
+                except BaseException as exc:
+                    print(f"El visor interactivo de Trimesh falló: {exc}")
+
+            return scene
+        else:
+            raise ValueError("Modo no reconocido. Use '3d' o '2d'.")

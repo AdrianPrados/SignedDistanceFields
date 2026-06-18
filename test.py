@@ -19,4 +19,14 @@ print("Gradient:", grad)
 # grad: gradient of SDF (for collision avoidance, etc.)
 
 # Visualize at a specific configuration
-robot.visualize(theta,mesh_points=40000, nb_data=150)
+#robot.visualize(theta,mesh_points=40000, nb_data=150)
+robot.visualize_lightweight(theta,num_points_per_link=700)
+robot.visualize_level_curves(
+    theta=theta,
+    mode="2d",
+    plane="yz",                             
+    levels=[0.0, 0.02, 0.04, 0.06, 0.08], 
+    num_points_per_link=200,              
+    show_frames=False,                     
+    show=True                             
+)

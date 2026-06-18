@@ -51,6 +51,7 @@ def main():
     t = 0
     prev_real_pos = None
     prev_ghost_pos = None
+    points_id = None
 
     try:
         while True:
@@ -72,6 +73,7 @@ def main():
             v_att = Kp * (target_angles - current_angles)
 
             # --- C. FUERZA REPULSIVA (EL OBSTÁCULO) ---
+            # Activamos requires_grad para poder derivar el SDF respecto a los ángulos
             theta_tensor = torch.tensor(current_angles, dtype=torch.float32, requires_grad=True)
             point_tensor = torch.tensor([obst_pos], dtype=torch.float32)
             
@@ -80,7 +82,36 @@ def main():
             
             v_rep = np.zeros(7)
             margen_seguridad = 0.35 
+
+            # --- D. VISUALIZACIÓN DINÁMICA DEL SDF LIGHTWEIGHT ---
+            # Pasamos un tensor limpio (sin requires_grad) a la función de visualización
+            theta_vis = torch.tensor(current_angles, dtype=torch.float32)
+            # Extraemos la nube de puntos (100 puntos por link es ligero y visualmente claro)
+            surface_points = robot_sdf.get_surface_points(theta_vis, num_points_per_link=100, safety_margin=0.05)
             
+            if real_distance < margen_seguridad:
+                sdf_color = [1.0, 0.6, 0.0] # Naranja/Amarillo (Zona de riesgo)
+            else:
+                sdf_color = [0.1, 0.6, 1.0] # Azul cian (Zona segura)
+
+            if len(surface_points) > 0:
+                if points_id is None:
+                    # 1ª VEZ: Creamos los puntos (sin lifeTime) y almacenamos su ID
+                    points_id = p.addUserDebugPoints(
+                        pointPositions=surface_points,
+                        pointColorsRGB=[sdf_color] * len(surface_points),
+                        pointSize=3
+                    )
+                else:
+                    # SIGUIENTES VECES: Reemplazamos los puntos instantáneamente
+                    points_id = p.addUserDebugPoints(
+                        pointPositions=surface_points,
+                        pointColorsRGB=[sdf_color] * len(surface_points),
+                        pointSize=3,
+                        replaceItemUniqueId=points_id
+                    )
+            
+            # --- E. CÁLCULO DE EVASIÓN ---
             if real_distance < margen_seguridad:
                 sdf.backward() 
                 grad_theta = theta_tensor.grad.numpy() 
@@ -89,16 +120,14 @@ def main():
                 v_rep = fuerza * grad_theta
                 
                 # --- VISUALIZAR EL PUNTO DE EVASIÓN ---
-                # Usamos PyBullet para encontrar el punto exacto más cercano entre el robot y la bola
                 closest_points = p.getClosestPoints(robot_id, obstacle_id, distance=2.0)
                 if len(closest_points) > 0:
-                    punto_en_robot = closest_points[0][6] # Coordenada 3D en la carcasa del robot
-                    punto_en_bola = closest_points[0][5]  # Coordenada 3D en la bola
+                    punto_en_robot = closest_points[0][6] 
+                    punto_en_bola = closest_points[0][5]  
                     
-                    # Dibujar una línea roja gruesa (Vector de repulsión) que dura 0.1 segundos
                     p.addUserDebugLine(punto_en_robot, punto_en_bola, lineColorRGB=[1, 0, 0], lineWidth=5, lifeTime=0.1)
 
-            # --- D. COMBINAR Y MOVER ---
+            # --- F. COMBINAR Y MOVER ---
             cmd_vel = v_att + v_rep
             cmd_vel = np.clip(cmd_vel, -2.0, 2.0)
             
@@ -106,7 +135,7 @@ def main():
                                         p.VELOCITY_CONTROL, 
                                         targetVelocities=cmd_vel.tolist())
 
-            # --- E. TRAZAR LAS LÍNEAS DE TRAYECTORIA EN EL AIRE ---
+            # --- G. TRAZAR LAS LÍNEAS DE TRAYECTORIA EN EL AIRE ---
             real_ee_state = p.getLinkState(robot_id, ee_link_index)
             ghost_ee_state = p.getLinkState(ghost_id, ee_link_index)
             
@@ -114,9 +143,7 @@ def main():
             ghost_pos = ghost_ee_state[0]
             
             if prev_real_pos is not None:
-                # Línea Azul = Trayectoria Real del Robot (duración 8 segundos para no saturar memoria)
                 p.addUserDebugLine(prev_real_pos, real_pos, lineColorRGB=[0, 0.3, 1], lineWidth=3, lifeTime=8.0)
-                # Línea Verde = Trayectoria Planeada Ideal (duración 8 segundos)
                 p.addUserDebugLine(prev_ghost_pos, ghost_pos, lineColorRGB=[0, 1, 0], lineWidth=2, lifeTime=8.0)
 
             prev_real_pos = real_pos
