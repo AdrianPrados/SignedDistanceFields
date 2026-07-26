@@ -688,8 +688,8 @@ class RobotSDF:
         self,
         theta: torch.Tensor,
         nb_data: int = 64,
-        domain_min: Tuple[float, float, float] = (-2.0, -2.0, -2.0),
-        domain_max: Tuple[float, float, float] = (2.0, 2.0, 2.0),
+        domain_min: Tuple[float, float, float] = (-2.5, -2.5, -2.5),
+        domain_max: Tuple[float, float, float] = (2.5, 2.5, 2.5),
         show: bool = True,
         out_path: Optional[str] = None,
         mesh_points=200_000,
@@ -1017,7 +1017,7 @@ class RobotSDF:
                 plt.figure(figsize=(8, 7))
                 # Fondo térmico continuo para denotar el gradiente del campo
                 contour_f = plt.contourf(grid_u_np, grid_v_np, sdf_grid, levels=50, cmap="RdYlGn")
-                plt.colorbar(contour_f, label="Valor del SDF (metros)")
+                plt.colorbar(contour_f, label="SDF value (meters)")
                 
                 # Resaltar la superficie metálica (0.0) sobre los márgenes flotantes
                 linewidths = [2.5 if l == 0.0 else 1.2 for l in levels]
@@ -1031,7 +1031,7 @@ class RobotSDF:
                     linestyles=linestyles
                 )
                 plt.clabel(contours, inline=True, fmt="%.2f", fontsize=10)
-                plt.title(f"Corte SDF en Plano {plane.upper()} (Eje ortogonal = {intercept}m)")
+                plt.title(f"SDF Cross-Section in the {plane.upper()} plane (Orthogonal axes = {intercept}m)")
                 plt.xlabel(xlabel)
                 plt.ylabel(ylabel)
                 plt.grid(True, linestyle=":", alpha=0.6)
