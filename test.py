@@ -36,8 +36,8 @@ import os
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 # Load the model
-urdf_path = "/home/adrian/Escritorio/ImitationLearning/SignedDistanceFields/RDF_v2/urdf/ADAM/models/robot/rb1_base_description/robots/robotDummyOriginal.urdf"
-model_path = "/home/adrian/Escritorio/ImitationLearning/SignedDistanceFields/RDF_v2/models/ADAM/robotDummyOriginal_bf_4_seg3_visual.pt"
+urdf_path = "/home/adrian/Escritorio/ImitationLearning/SignedDistanceFields/RDF_v2/urdf/ur5e/ur5e.urdf"
+model_path = "/home/adrian/Escritorio/ImitationLearning/SignedDistanceFields/RDF_v2/models/ur5e/ur5e_bf_4_seg3_visual.pt"
 
 robot = RobotSDF(urdf_path, mesh_type="visual", n_func=4, n_seg=3)
 robot.load(model_path)
@@ -45,7 +45,14 @@ robot.load(model_path)
 # Inicializamos todos los joints a cero
 theta = torch.zeros(robot.dof)
 
-# --- BRAZO DERECHO (UR3) ---
+theta[0] = 0.0      # rb1_right_arm_shoulder_pan_joint
+theta[1] = -1.57    # rb1_right_arm_shoulder_lift_joint 
+theta[2] = 1.57     # rb1_right_arm_elbow_joint 
+theta[3] = -1.57    # rb1_right_arm_wrist_1_joint 
+theta[4] = -1.57    # rb1_right_arm_wrist_2_joint
+theta[5] = 0.0     # rb1_right_arm_wrist_3_joint
+
+""" # --- BRAZO DERECHO (UR3) ---
 # Índices del 5 al 10
 theta[5] = 0.0      # rb1_right_arm_shoulder_pan_joint
 theta[6] = -1.57    # rb1_right_arm_shoulder_lift_joint 
@@ -62,7 +69,7 @@ theta[24] = -1.57   # rb1_left_arm_shoulder_lift_joint
 theta[25] = -1.57    # rb1_left_arm_elbow_joint 
 theta[26] = -3.1416   # rb1_left_arm_wrist_1_joint 
 theta[27] = -1.57   # rb1_left_arm_wrist_2_joint
-theta[28] = 0.0     # rb1_left_arm_wrist_3_joint
+theta[28] = 0.0     # rb1_left_arm_wrist_3_joint """
 
 # (Opcional) Consultar valores SDF en la nueva postura
 points = torch.rand(1000, 3) * 2.0 - 1.0  
@@ -70,7 +77,7 @@ sdf, grad = robot.query(points, theta)
 
 # 4. Visualización 3D
 print("Generando visualización 3D...")
-robot.visualize(theta, mesh_points=50000, nb_data=150)
+#robot.visualize(theta, mesh_points=50000, nb_data=150)
 robot.visualize_lightweight(theta, num_points_per_link=700)
 
 # 5. Visualización 2D (Corte YZ)
@@ -78,8 +85,8 @@ print("Generando visualización 2D (Corte YZ)...")
 robot.visualize_level_curves(
     theta=theta,
     mode="2d",
-    plane="yz",                             
-    levels=[0.0, 0.02, 0.04, 0.06, 0.08], 
+    plane="xz",                             
+    levels=[0.0, 0.01, 0.02, 0.04, 0.06, 0.08, 0.1,0.12,0.14], 
     num_points_per_link=200,              
     show_frames=False,                     
     show=True                             

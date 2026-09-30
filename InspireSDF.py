@@ -25,7 +25,7 @@ print("Gradient:", grad)
 
 # 4. Visualización 3D
 print("Generando visualización 3D...")
-robot.visualize(theta,mesh_points=40000, nb_data=300, domain_min=(-0.5, -0.5, -0.5), domain_max=(0.5, 0.5, 0.5))
+#robot.visualize(theta,mesh_points=40000, nb_data=300, domain_min=(-0.5, -0.5, -0.5), domain_max=(0.5, 0.5, 0.5))
 robot.visualize_lightweight(theta, num_points_per_link=2000)
 
 # 5. Visualización 2D (Corte YZ)

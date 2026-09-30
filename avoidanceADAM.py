@@ -39,9 +39,9 @@ def main():
     pose_objetivo = np.zeros(dof)
     for idx in left_arm_indices:
         name = joint_names[idx]
-        if "shoulder_pan" in name: pose_objetivo[idx] = 0.7
-        if "shoulder_lift" in name: pose_objetivo[idx] = -1.1
-        if "elbow" in name: pose_objetivo[idx] = 1.6
+        if "shoulder_pan" in name: pose_objetivo[idx] = 0.9
+        if "shoulder_lift" in name: pose_objetivo[idx] = -1.3
+        if "elbow" in name: pose_objetivo[idx] = 1.9
     
     # 2. CARGAR MODELO SDF
     robot_sdf = RobotSDF(urdf_path, mesh_type="visual", n_func=4, n_seg=3)
@@ -60,7 +60,7 @@ def main():
     # 4. INDICADORES VISUALES
     # Objetivo (Azul)
     goal_visual_id = p.createVisualShape(p.GEOM_SPHERE, radius=0.04, rgbaColor=[0, 0, 1, 1])
-    p.createMultiBody(baseMass=0, baseVisualShapeIndex=goal_visual_id, basePosition=[0.5, 0.5, 1.2])
+    p.createMultiBody(baseMass=0, baseVisualShapeIndex=goal_visual_id, basePosition=[0.5, 0.0, 1.2])
 
     # Punto de Evasión (Amarillo)
     evasion_point_body = p.createMultiBody(
